@@ -1,0 +1,7 @@
+---
+# Допустимые провайдеры: plaintext, ansible_vault, hashi_vault, env
+luks_secret_provider: "plaintext"
+luks_passphrase_plaintext: "SuperSecureDefaultPassword123!"
+
+# Путь для сохранения временного файла ключа на целевом хосте для модуля luks_device
+luks_key_file_path: "/etc/luks_key.bin"

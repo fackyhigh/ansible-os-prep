@@ -1,0 +1,201 @@
+---
+- name: Load encryption secrets dynamically based on provider
+  ansible.builtin.include_tasks: "secrets_{{ luks_secret_provider }}.yml"
+
+- name: Identify storage layouts and system root partition
+  ansible.builtin.set_fact:
+    root_mount: "{{ ansible_mounts | selectattr('mount', 'equalto', '/') | first }}"
+
+- name: Print root mount
+  ansible.builtin.debug:
+    msg: "{{ root_mount }}"
+# # Хуйня
+# - name: 1. Extract and store system root UUID
+#   ansible.builtin.set_fact:
+#     root_uuid: "{{ (ansible_mounts | selectattr('mount', 'equalto', '/') | first).uuid }}"
+# # Хуйня
+# - name: 2. Find parent disk containing partition with matching UUID
+#   ansible.builtin.set_fact:
+#     # Перебираем ключи дисков (xvda, nvme0n1) и проверяем, есть ли наш UUID внутри строки-дампа их разделов
+#     root_disk: >-
+#       {% for disk_name, disk_data in ansible_facts['devices'].items() %}
+#         {% if root_uuid in (disk_data.partitions | string) %}
+#           {{ disk_name }}
+#         {% endif %}
+#       {% endfor %}
+
+# - name: Extract exact root partition name by matching UUID across devices
+#   ansible.builtin.set_fact:
+#     root_partition: >-
+#       {{
+#         ansible_facts['devices'].keys()
+#         | map('extract', ansible_facts['devices'])
+#         | map('attribute', 'partitions')
+#         | map('dict2items')
+#         | flatten
+#         | selectattr('value.uuid', 'defined')
+#         | selectattr('value.uuid', 'equalto', root_mount.uuid)
+#         | map('attribute', 'key')
+#         | first
+#       }}
+
+- name: Print root partition name
+  ansible.builtin.debug:
+    # msg: "{{ root_partition }}"
+    msg: "{{ ansible_facts['devices'] | dict2items  }}"
+
+# - name: Determine disk hosting the root partition (Supports standard and NVMe layout)
+#   ansible.builtin.set_fact:
+#     root_disk: "{{ root_mount.device | regex_replace('(p[0-9]+|[0-9]+)$', '') }}"
+
+- name: Print root disk name
+  ansible.builtin.debug:
+    msg: "{{ root_disk }}"
+
+- name: Scan and identify the second physical disk without root
+  ansible.builtin.set_fact:
+    second_disk: >-
+      {{ 
+        (ansible_facts['devices'].keys() 
+        | map('regex_replace', '^', '/dev/') 
+        | reject('equalto', root_disk) 
+
+        | reject('search', 'loop|ram|dm-') 
+        | list) 
+        | first 
+      }}
+
+- name: Print second disk name
+  ansible.builtin.debug:
+    msg: "{{ second_disk }}"
+  when: second_disk is defined
+
+- name: Fail if secondary usable storage media is missing
+  ansible.builtin.fail:
+    msg: "Critical: No secondary disk available without root partition."
+  when: second_disk is not defined or not second_disk
+
+- name: Initialize empty partition lists for dynamic orchestration
+  ansible.builtin.set_fact:
+    partitions_to_encrypt: []
+
+- name: Inspect secondary partition status
+  block:
+    - name: Verify if user specified partition exists on target host
+      ansible.builtin.stat:
+        path: "{{ target_second_disk_partition }}"
+      register: target_part_stat
+
+    - name: Analyze active mountpoints for the target partition
+      ansible.builtin.set_fact:
+        matching_mount: "{{ ansible_mounts | selectattr('device', 'equalto', target_second_disk_partition) | list }}"
+
+    - name: Notify user if designated partition is locked/mounted
+      ansible.builtin.debug:
+        msg: "Warning: Partition {{ target_second_disk_partition }} is already active/mounted. Skipping encryption."
+      when: matching_mount | length > 0
+
+    - name: Track existing unmounted partition for target sequence
+      ansible.builtin.set_fact:
+        partitions_to_encrypt: "{{ partitions_to_encrypt + [ {'dev': target_second_disk_partition, 'mount': '/mnt/task1'} ] }}"
+      when: 
+        - target_part_stat.stat.exists
+        - matching_mount | length == 0
+
+    - name: Print partitions to encrypt
+      ansible.builtin.debug:
+        msg: "{{ partitions_to_encrypt }}"
+
+    # Обработка сценария отсутствия раздела (2б)
+    # - name: Conditional layout provisioning via auto-partition flags
+    #   block:
+    #     - name: Check if secondary disk already contains any layout records
+    #       ansible.builtin.set_fact:
+    #         disk_has_partitions: "{{ ansible_facts['devices'][second_disk | basename]['partitions'] | length > 0 }}"
+
+    #     - name: Halt auto-partitioning if active non-empty layout detected
+    #       ansible.builtin.debug:
+    #         msg: "Automation flag 'create_partition_if_not_exist' is true, but disk {{ second_disk }} is not empty. Aborting disk creation."
+    #       when: disk_has_partitions
+
+    #     - name: Execute GPT layout deployment on raw block storage
+    #       block:
+    #         - name: Install parted dependencies
+    #           ansible.builtin.package:
+    #             name: parted
+    #             state: present
+
+    #         - name: Write primary GPT structural label
+    #           community.general.parted:
+    #             device: "{{ second_disk }}"
+    #             label: gpt
+    #             state: present
+
+    #         - name: Allocate full capacity block volume to primary container
+    #           community.general.parted:
+    #             device: "{{ second_disk }}"
+    #             number: 1
+    #             state: present
+    #             part_end: "100%"
+
+    #         - name: Append freshly deployed partition structure to queue
+    #           ansible.builtin.set_fact:
+    #             partitions_to_encrypt: "{{ partitions_to_encrypt + [ {'dev': second_disk ~ '1', 'mount': '/mnt/task2'} ] }}"
+    #       when: not disk_has_partitions
+    #   when: not target_part_stat.stat.exists and (create_partition_if_not_exist | default(false) | bool)
+
+- name: Identify parallel partitions sitting next to root on root disk (Задание 1.2)
+  ansible.builtin.set_fact:
+    adjacent_partitions: "{{ ansible_facts['devices'][root_disk | basename]['partitions'].keys() | map('regex_replace', '^', root_disk) | reject('equalto', root_mount.device) | list }}"
+
+- name: Print partitions to encrypt
+  ansible.builtin.debug:
+    msg: "{{ adjacent_partitions }}"
+
+- name: Queue verified adjacent root-disk partition structures
+  ansible.builtin.set_fact:
+    partitions_to_encrypt: "{{ partitions_to_encrypt + [ {'dev': item, 'mount': '/mnt/task1'} ] }}"
+  loop: "{{ adjacent_partitions }}"
+  when: adjacent_partitions | length > 0
+
+- name: Print partitions to encrypt
+  ansible.builtin.debug:
+    msg: "{{ partitions_to_encrypt }}"
+
+# - name: Execute Orchestrated LUKS Routine on gathered targets
+#   block:
+#     - name: Ensure Cryptsetup binaries are present
+#       ansible.builtin.package:
+#         name: cryptsetup
+#         state: present
+
+#     - name: Provision Crypt Containers via LUKS Module (Using Memory Passphrase)
+#       community.crypto.luks_device:
+#         device: "{{ item.dev }}"
+#         state: "opened"
+#         name: "luks_{{ item.dev | basename }}"
+#         # Передаем пароль напрямую строкой без создания файлов на диске!
+#         passphrase: "{{ luks_resolved_passphrase }}"
+#       loop: "{{ partitions_to_encrypt }}"
+
+#     - name: Provision standard Ext4 structural layer on active mappers
+#       community.general.filesystem:
+#         fstype: ext4
+#         dev: "/dev/mapper/luks_{{ item.dev | basename }}"
+#       loop: "{{ partitions_to_encrypt }}"
+
+#     - name: Create mount point target structures
+#       ansible.builtin.file:
+#         path: "{{ item.mount }}"
+#         state: directory
+#         mode: '0755'
+#       loop: "{{ partitions_to_encrypt }}"
+
+#     - name: Mount open crypto volumes onto verified directories
+#       ansible.builtin.mount:
+#         path: "{{ item.mount }}"
+#         src: "/dev/mapper/luks_{{ item.dev | basename }}"
+#         fstype: ext4
+#         state: mounted
+#       loop: "{{ partitions_to_encrypt }}"
+

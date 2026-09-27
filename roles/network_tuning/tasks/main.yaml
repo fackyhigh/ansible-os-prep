@@ -1,0 +1,61 @@
+---
+- name: Dynamically detect the active system network interface
+  ansible.builtin.set_fact:
+    active_interface: >-
+      {{
+        ansible_facts['interfaces'] 
+        | map('extract', ansible_facts) 
+        | selectattr('active', 'defined') 
+        | selectattr('active') 
+        | selectattr('ipv4', 'defined') 
+        | rejectattr('device', 'equalto', 'lo') 
+        | map.attribute('device') 
+        | first
+      }}
+
+- name: Process interface renaming if active interface is found
+  block:
+    - name: Fail if no active interface could be automatically discovered
+      ansible.builtin.fail:
+        msg: "Critical: Could not automatically detect an active network interface with an IPv4 address."
+      when: active_interface is not defined or not active_interface
+
+    - name: Display detected interface before renaming operations
+      ansible.builtin.debug:
+        msg: "Detected active interface: '{{ active_interface }}' (MAC: {{ ansible_facts[active_interface]['macaddress'] }}). Changing to net0..."
+
+    - name: Configure udev rule for persistent interface renaming
+      ansible.builtin.copy:
+        dest: /etc/udev/rules.d/70-persistent-net.rules
+        content: |
+          SUBSYSTEM=="net", ACTION=="add", DRIVERS=="?*", ATTR{address}=="{{ ansible_facts[active_interface]['macaddress'] }}", NAME="net0"
+        mode: '0644'
+
+    - name: Force rename network interface actively right now
+      ansible.builtin.command: >
+        ip link set {{ active_interface }} down && 
+        ip link set {{ active_interface }} name net0 && 
+        ip link set net0 up
+      register: rename_cmd
+      failed_when: false
+      changed_when: rename_cmd.rc == 0
+
+    - name: Refresh network facts to register net0 architecture
+      ansible.builtin.setup:
+        gather_subset:
+          - network
+
+    - name: Display information about the renamed interface
+      ansible.builtin.debug:
+        msg: 
+          - "=== RENAMED INTERFACE VERIFICATION ==="
+          - "Interface Name: net0"
+          - "IP Addresses: {{ ansible_facts['net0']['ipv4']['address'] | default('No IPv4') }}"
+          - "MAC Address: {{ ansible_facts['net0']['macaddress'] | default('Unknown') }}"
+          - "Operational Status: {{ ansible_facts['net0']['active'] | default('Unknown') }}"
+      when: ansible_facts['net0'] is defined
+
+  rescue:
+    - name: Handle interface renaming operational failure
+      ansible.builtin.fail:
+        msg: "Failed during the automatic discovery or renaming process for network interfaces."

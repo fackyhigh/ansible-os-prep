@@ -1,0 +1,40 @@
+---
+- name: Install performance tuning packages for Ubuntu CPU management
+  ansible.builtin.package:
+    name:
+      - cpufrequtils
+      - sysfsutils
+    state: present
+
+- name: Enforce OS Performance governor targets across kernel cores
+  block:
+    - name: Modify cpufrequtils infrastructure config to Performance Mode
+      ansible.builtin.copy:
+        dest: /etc/default/cpufrequtils
+        content: |
+          ENABLE="true"
+          GOVERNOR="performance"
+        mode: '0644'
+      register: cpufreq_config
+
+    - name: Trigger service reload for execution scaling profiles
+      ansible.builtin.systemd:
+        name: cpufrequtils
+        state: restarted
+        enabled: true
+      when: cpufreq_config.changed
+
+- name: Hardcode C-State kernel constraints inside Bootloader
+  block:
+    - name: Apply clean cstate core exclusions inside GRUB CMDLINE variable
+      ansible.builtin.lineinfile:
+        path: /etc/default/grub
+        regexp: '^GRUB_CMDLINE_LINUX_DEFAULT="((?:(?!intel_idle\.max_cstate|processor\.max_cstate).)*?)"$'
+        line: 'GRUB_CMDLINE_LINUX_DEFAULT="\1 intel_idle.max_cstate=0 processor.max_cstate=0"'
+        backrefs: true
+      register: grub_line_modification
+
+    - name: Rebuild system boot init config layers for platform stability
+      ansible.builtin.command: update-grub
+      changed_when: true
+      when: grub_line_modification.changed
