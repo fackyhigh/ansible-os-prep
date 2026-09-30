@@ -1,0 +1,6 @@
+---
+# Name of the target network interface after renaming
+network_interface_rename: "net0"
+
+# Whether to reboot the host after the interface rename to apply the netplan change
+network_reboot_after_rename: true

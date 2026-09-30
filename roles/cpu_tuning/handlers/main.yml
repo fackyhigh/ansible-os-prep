@@ -1,0 +1,14 @@
+---
+- name: Reboot host to apply CPU C-State kernel parameters
+  ansible.builtin.reboot:
+    reboot_timeout: 600
+  listen: "reboot host to apply cpu cstate"
+  when: cpu_tuning_reboot | default(false)
+
+- name: Refresh system facts after reboot
+  ansible.builtin.setup:
+    gather_subset:
+      - hardware
+      - network
+  listen: "reboot host to apply cpu cstate"
+  when: cpu_tuning_reboot | default(false)

@@ -2,6 +2,21 @@
 # Допустимые провайдеры: plaintext, ansible_vault, hashi_vault, env
 luks_secret_provider: "plaintext"
 luks_passphrase_plaintext: "SuperSecureDefaultPassword123!"
+# Для провайдера ansible_vault:
+#   - определите vault_luks_passphrase
+#   - если не определена, роль останавливается с ошибкой (нет insecure фолбэка).
+vault_luks_passphrase: ""
+second_disk_partition_name: "my_partition"
+create_second_disk_partition: true
 
-# Путь для сохранения временного файла ключа на целевом хосте для модуля luks_device
-luks_key_file_path: "/etc/luks_key.bin"
+# partition_filter_min_bytes для фильрации партиций
+partition_filter_min_bytes: 104857600
+
+# Дефолты для секрет-провайдера env
+luks_env_passphrase_env_var: "LUKS_ENV_PASSPHRASE"
+
+# Дефолты для секрет-провайдера hashi_vault
+hashi_vault_url: "http://127.0.0.1:8200"
+hashi_vault_secret_path: "secret/data/storage/luks"
+hashi_vault_secret_field: "password"
+hashi_vault_token_env_var: "VAULT_TOKEN"

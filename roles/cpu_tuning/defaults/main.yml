@@ -1,0 +1,20 @@
+---
+# CPU scaling governor to enforce (performance = productive mode, ondemand/powersave = power-saving)
+cpu_scaling_governor: "performance"
+
+# Kernel parameters that limit deeper C-states (intel_idle + generic idle)
+# 1 = allow C1 as the deepest sleep state (per AWS recommended recipe).
+cpu_cstate_kernel_params:
+  - "intel_idle.max_cstate=1"
+  - "processor.max_cstate=1"
+
+# GRUB configuration file to modify and path to the regenerated config used to detect changes
+cpu_grub_cfg_path: "/etc/default/grub"
+cpu_grub_generated_cfg: "/boot/grub/grub.cfg"
+
+# Whether C-state disabling via GRUB should be applied.
+# Auto-set by the role based on architecture (x86_64); override to force on/off.
+grub_cstate_required: "{{ ansible_facts['architecture'] == 'x86_64' }}"
+
+# Whether to reboot the host after applying C-state kernel parameters (required for them to take effect)
+cpu_tuning_reboot: true

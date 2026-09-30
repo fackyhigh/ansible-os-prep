@@ -1,0 +1,32 @@
+---
+- name: Reboot host to apply interface rename
+  ansible.builtin.reboot:
+    reboot_timeout: 300
+  listen: "reboot interface rename"
+  when: network_reboot_after_rename | default(false)
+
+- name: Refresh network facts after reboot
+  ansible.builtin.setup:
+    gather_subset:
+      - network
+  listen: "reboot interface rename"
+  when: network_reboot_after_rename | default(false)
+
+- name: Fail if the interface was not renamed to the target name
+  ansible.builtin.fail:
+    msg: "Rename verification failed: interface '{{ network_interface_rename }}' was not created after reboot. Check the netplan configuration."
+  listen: "reboot interface rename"
+  when: >
+    network_reboot_after_rename | default(false)
+    and ansible_facts[network_interface_rename] is not defined
+
+- name: Display info about the renamed interface after reboot
+  ansible.builtin.debug:
+    msg:
+      - "=== RENAMED INTERFACE VERIFICATION ==="
+      - "Interface Name: {{ network_interface_rename }}"
+      - "IP Addresses: {{ ansible_facts[network_interface_rename]['ipv4']['address'] | default('No IPv4') }}"
+      - "MAC Address: {{ ansible_facts[network_interface_rename]['macaddress'] | default('Unknown') }}"
+      - "Operational Status: {{ ansible_facts[network_interface_rename]['active'] | default('Unknown') }}"
+  listen: "reboot interface rename"
+  when: network_reboot_after_rename | default(false)

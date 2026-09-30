@@ -5,8 +5,8 @@
   
   roles:
     - role: luks_encrypt
-    # - role: cpu_tuning
-    # - role: network_tuning
+    - role: network_tuning
+    - role: cpu_tuning
 
   tasks:
   - name: Gather final CPU and Multi-threading topology metrics
@@ -15,12 +15,21 @@
         ansible.builtin.setup:
           gather_subset:
             - hardware
+      - name: Derive the CPU vendor from the processor tuple
+        ansible.builtin.set_fact:
+          cpu_vendor_name: >-
+            {{
+              'Intel' if (ansible_facts['processor'] | default([]) | first | string) | regex_search('GenuineIntel')
+              else ('AMD' if (ansible_facts['processor'] | default([]) | first | string) | regex_search('AuthenticAMD')
+              else 'Unknown')
+            }}
       - name: Display CPU List and Threading Capability
         ansible.builtin.debug:
           msg:
             - "=== CPU TOPOLOGY INFORMATION ==="
+            - "CPU Vendor: {{ cpu_vendor_name }}"
             - "Total Logical CPUs: {{ ansible_facts['processor_vcpus'] }}"
             - "CPU Model: {{ ansible_facts['processor'] | default('Unknown') }}"
             - "Cores per Socket: {{ ansible_facts['processor_cores'] }}"
             - "Threads per Core: {{ ansible_facts['processor_threads_per_core'] | default('N/A') }}"
-            - "Hyper-Threading/SMT Enabled: {{ 'Yes' if (ansible_facts['processor_threads_per_core'] | default(1) > 1) else 'No' }}"
+            - "{{ 'Hyper-Threading' if cpu_vendor_name == 'Intel' else ('AMD Simultaneous Multi-Threading' if cpu_vendor_name == 'AMD' else 'SMT') }} Enabled: {{ 'Yes' if (ansible_facts['processor_threads_per_core'] | default(1) | int > 1) else 'No' }}"

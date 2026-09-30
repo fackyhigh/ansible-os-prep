@@ -1,40 +1,128 @@
 ---
-- name: Install performance tuning packages for Ubuntu CPU management
+- name: Validate OS is a Debian/Ubuntu family with apt support
+  ansible.builtin.fail:
+    msg: >-
+      cpu_tuning role supports only Debian/Ubuntu (uses cpufrequtils and update-grub).
+      Detected {{ ansible_facts['distribution'] }} on {{ ansible_facts['os_family'] }}.
+  when: ansible_facts['os_family'] != 'Debian'
+
+- name: Install performance tuning packages for CPU management
   ansible.builtin.package:
-    name:
-      - cpufrequtils
-      - sysfsutils
+    name: cpufrequtils
     state: present
 
-- name: Enforce OS Performance governor targets across kernel cores
+- name: Detect current scaling governor to decide whether changes are required
+  ansible.builtin.shell:
+    cmd: >-
+      for gov in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
+        cat "$gov" 2>/dev/null; echo; done
+      | sort -u | tr '\n' ' '
+  changed_when: false
+  failed_when: false
+  register: cpu_scaling_governors
+  check_mode: false
+
+- name: Warn if the CPU has no cpufreq/scaling governor support
+  ansible.builtin.debug:
+    msg: >-
+      No scaling governor found under /sys/devices/system/cpu. This usually means
+      the kernel/CPU does not expose cpufreq scaling. Skipping governor enforcement.
+  when: cpu_scaling_governors.stdout | trim | length == 0
+
+- name: Enforce the selected scaling governor across all CPU cores
   block:
-    - name: Modify cpufrequtils infrastructure config to Performance Mode
+    - name: Modify cpufrequtils infrastructure config to the selected governor
       ansible.builtin.copy:
         dest: /etc/default/cpufrequtils
         content: |
           ENABLE="true"
-          GOVERNOR="performance"
+          GOVERNOR="{{ cpu_scaling_governor }}"
         mode: '0644'
       register: cpufreq_config
 
-    - name: Trigger service reload for execution scaling profiles
+    - name: Trigger service reload for the new execution scaling profile
       ansible.builtin.systemd:
         name: cpufrequtils
         state: restarted
         enabled: true
       when: cpufreq_config.changed
+  when: cpu_scaling_governors.stdout | trim | length > 0
 
-- name: Hardcode C-State kernel constraints inside Bootloader
+- name: Ensure C-State disabling kernel parameters are present in GRUB
   block:
-    - name: Apply clean cstate core exclusions inside GRUB CMDLINE variable
-      ansible.builtin.lineinfile:
-        path: /etc/default/grub
-        regexp: '^GRUB_CMDLINE_LINUX_DEFAULT="((?:(?!intel_idle\.max_cstate|processor\.max_cstate).)*?)"$'
-        line: 'GRUB_CMDLINE_LINUX_DEFAULT="\1 intel_idle.max_cstate=0 processor.max_cstate=0"'
-        backrefs: true
-      register: grub_line_modification
+    - name: Fail if the GRUB_CMDLINE_LINUX_DEFAULT parameter is absent
+      ansible.builtin.command: grep -q '^GRUB_CMDLINE_LINUX_DEFAULT=' {{ cpu_grub_cfg_path }}
+      check_mode: false
+      changed_when: false
+      register: grub_param_presence
+      failed_when: grub_param_presence.rc != 0
 
-    - name: Rebuild system boot init config layers for platform stability
-      ansible.builtin.command: update-grub
+    - name: Record the checksum of the GRUB default config before modification
+      ansible.builtin.stat:
+        path: "{{ cpu_grub_cfg_path }}"
+      register: grub_file_before
+      check_mode: false
+
+    - name: Replace stale C-state params and inject the enforced ones into the cmdline
+      ansible.builtin.command:
+        cmd: >-
+          sed -E -i
+          -e 's/\bintel_idle\.max_cstate=[0-9]+ ?//g'
+          -e 's/\bprocessor\.max_cstate=[0-9]+ ?//g'
+          -e "s/GRUB_CMDLINE_LINUX_DEFAULT=\"([^\"]*)\"/GRUB_CMDLINE_LINUX_DEFAULT=\"\\1 {{ cpu_cstate_kernel_params | join(' ') }}\"/"
+          {{ cpu_grub_cfg_path }}
+      register: grub_sed_modification
+      check_mode: false
+      changed_when: false
+
+    - name: Record the checksum of the GRUB default config after modification
+      ansible.builtin.stat:
+        path: "{{ cpu_grub_cfg_path }}"
+      register: grub_file_after
+      check_mode: false
+
+    - name: Report whether the GRUB default config was actually modified
+      ansible.builtin.debug:
+        msg: >-
+          GRUB cmdline at {{ cpu_grub_cfg_path }}
+          {{ 'was modified (changed)' if grub_file_before.stat.checksum != grub_file_after.stat.checksum
+             else 'is already correct (no change)' }}.
+
+    - name: Rebuild GRUB boot configuration to apply C-state flags
+      ansible.builtin.command:
+        cmd: update-grub
+      check_mode: false
+      changed_when: grub_file_before.stat.checksum != grub_file_after.stat.checksum
+      when: grub_file_before.stat.checksum != grub_file_after.stat.checksum
+
+    - name: Verify that the generated GRUB config actually contains the C-state flags
+      ansible.builtin.shell:
+        cmd: "grep -F '{{ item }}' {{ cpu_grub_generated_cfg }}"
+      changed_when: false
+      failed_when: false
+      register: grub_cstate_checks
+      loop: "{{ cpu_cstate_kernel_params }}"
+      when: grub_file_before.stat.checksum != grub_file_after.stat.checksum
+
+    - name: Schedule reboot only when all C-state flags are present in grub.cfg
+      ansible.builtin.debug:
+        msg: >-
+          All C-state kernel parameters are present in {{ cpu_grub_generated_cfg }}.
+          Rebooting to apply them.
       changed_when: true
-      when: grub_line_modification.changed
+      notify: "reboot host to apply cpu cstate"
+      when:
+        - grub_file_before.stat.checksum != grub_file_after.stat.checksum
+        - grub_cstate_checks.results | default([]) | length > 0
+        - grub_cstate_checks.results | selectattr('rc', 'equalto', 0) | list | length == cpu_cstate_kernel_params | length
+
+    - name: Warn that C-state flags are missing from grub.cfg and skip reboot
+      ansible.builtin.debug:
+        msg: >-
+          C-state kernel parameter '{{ item.item }}' was not found in {{ cpu_grub_generated_cfg }}
+          after update-grub (rc={{ item.rc }}). Skipping reboot to keep the current kernel cmdline.
+      loop: "{{ grub_cstate_checks.results | default([]) }}"
+      when:
+        - grub_file_before.stat.checksum != grub_file_after.stat.checksum
+        - item.rc != 0
+  when: grub_cstate_required | bool
